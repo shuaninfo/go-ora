@@ -1,3 +1,3 @@
-module github.com/sijms/go-ora
+module github.com/shuaninfo/go-ora
 
 go 1.14
