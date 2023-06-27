@@ -5,7 +5,7 @@
 ###### the original oracle drivers are very complex and contain many features which are difficult to add them at one time
 ###### your feedbacks are very important for this project to proceed
 ```
-    - Use version 2 you will need to import github.com/sijms/go-ora/v2
+    - Use version 2 you will need to import github.com/shuaninfo/go-ora/v2
     - V2 is more preferred for oracle servers 10.2 and above
     - I always update the driver fixing issues and add new features so
       always ensure that you get latest release
@@ -681,7 +681,7 @@ _, err := conn.Exec(inputSql, go_ora.NVarChar("7586"))
 #### 1- importing:
     import (
       "database/sql"
-      _ "github.com/sijms/go-ora/v2"
+      _ "github.com/shuaninfo/go-ora/v2"
     )
       
 #### 2- create the connection

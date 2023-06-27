@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sijms/go-ora/v2/converters"
-	"github.com/sijms/go-ora/v2/network"
+	"github.com/shuaninfo/go-ora/v2/converters"
+	"github.com/shuaninfo/go-ora/v2/network"
 )
 
 type TNSType int

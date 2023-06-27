@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	_ "github.com/sijms/go-ora/v2"
+	_ "github.com/shuaninfo/go-ora/v2"
 	"os"
 	"time"
 )
