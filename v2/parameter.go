@@ -955,6 +955,7 @@ func (par *ParameterInfo) decodePrimValue(conn *Connection, udt bool) error {
 		return err
 	}
 	if par.BValue == nil {
+		par.oPrimValue = nil
 		return nil
 	}
 	switch par.DataType {
