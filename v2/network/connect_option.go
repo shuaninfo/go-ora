@@ -78,7 +78,7 @@ type ConnectionOption struct {
 }
 
 func extractServers(connStr string) ([]ServerAddr, error) {
-	r, err := regexp.Compile(`(?i)\(\s*ADDRESS\s*=\s*(\(\s*(HOST)\s*=\s*([\w,\.,\-]+)\s*\)|\(\s*(PORT)\s*=\s*([0-9]+)\s*\)|\(\s*(COMMUNITY)\s*=\s*([\w,\.,\-]+)\s*\)|\(\s*(PORT)\s*=\s*([0-9]+)\s*\)|\(\s*(PROTOCOL)\s*=\s*(\w+)\s*\))+\)`)
+	r, err := regexp.Compile(`(?i)\(\s*ADDRESS\s*=\s*(\(\s*(HOST)\s*=\s*([\w,\.,\-]+)\s*\)|\(\s*(PORT)\s*=\s*([0-9]+)\s*\)|\(\s*(COMMUNITY)\s*=\s*([\w,\.,\-]+)\s*\)|\(\s*(PORT)\s*=\s*([0-9]+)\s*\)|\(\s*(PROTOCOL)\s*=\s*(\w+)\s*\)\s*)+\)`)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +135,8 @@ func (op *ConnectionOption) updateSSL(server *ServerAddr) error {
 }
 
 func (op *ConnectionOption) UpdateDatabaseInfo(connStr string) error {
+	connStr = strings.ReplaceAll(connStr, "\r", "")
+	connStr = strings.ReplaceAll(connStr, "\n", "")
 	op.connStr = connStr
 	var err error
 	op.Servers, err = extractServers(connStr)
