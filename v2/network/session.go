@@ -472,10 +472,13 @@ func (session *Session) Connect(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		serversLength := len(connOption.Servers)
 		for _, srv := range servers {
 			connOption.AddServer(srv)
 		}
-		host = connOption.GetActiveServer(true)
+		if len(connOption.Servers) > serversLength {
+			host = connOption.GetActiveServer(true)
+		}
 		return session.Connect(ctx)
 	}
 	if refusePacket, ok := pck.(*RefusePacket); ok {
