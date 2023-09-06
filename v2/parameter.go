@@ -966,7 +966,7 @@ func (par *ParameterInfo) decodePrimValue(conn *Connection, udt bool) error {
 			return err
 		}
 		par.oPrimValue = strConv.Decode(par.BValue)
-	case RAW:
+	case RAW, LongRaw:
 		par.oPrimValue = par.BValue
 	case NUMBER:
 		if par.Scale == 0 && par.Precision <= 18 {
