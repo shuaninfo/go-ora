@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	go_ora "github.com/sijms/go-ora/v2"
+	go_ora "github.com/shuaninfo/go-ora/v2"
 	"strings"
 	"testing"
 	"time"

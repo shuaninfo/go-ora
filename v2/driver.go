@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sijms/go-ora/v2/converters"
+	"github.com/shuaninfo/go-ora/v2/converters"
 )
 
 type OracleDriver struct {
