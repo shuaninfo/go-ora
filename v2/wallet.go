@@ -2,39 +2,36 @@ package go_ora
 
 import (
 	"bytes"
-	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/hmac"
 	"crypto/sha1"
 	_ "crypto/sha1"
+	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"hash"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf16"
 )
 
-//type CertificateData
+// type CertificateData
 type wallet struct {
-	file          string
-	password      []byte
-	salt          []byte
-	sha1Iteration int
-	algType       int
-	credentials   []walletCredential
-	certificates  [][]byte
-	//certificates  []*x509.Certificate
+	file                string
+	password            []byte
+	salt                []byte
+	sha1Iteration       int
+	algType             int
+	credentials         []walletCredential
+	certificates        [][]byte
 	privateKeys         [][]byte
 	certificateRequests [][]byte
-	//Certificates  []*x509.Certificate
 }
 type walletCredential struct {
 	dsn      string
@@ -42,8 +39,8 @@ type walletCredential struct {
 	password string
 }
 
-// NewWallet create new wallet object from file path
-func NewWallet(filePath string) (*wallet, error) {
+// newWallet create new wallet object from file path
+func newWallet(filePath string) (*wallet, error) {
 	ret := new(wallet)
 	ret.file = filePath
 	err := ret.read()
@@ -52,7 +49,7 @@ func NewWallet(filePath string) (*wallet, error) {
 
 // read will read the file data decrypting file chunk to get wallet information
 func (w *wallet) read() error {
-	fileData, err := ioutil.ReadFile(w.file)
+	fileData, err := os.ReadFile(w.file)
 	if err != nil {
 		return err
 	}
@@ -161,101 +158,11 @@ func (w *wallet) read() error {
 }
 
 func (w *wallet) readPKCS12(data []byte) error {
-	encryptedData, err := w.decodeASN1(data)
+	data, err := w.decodeASN1(data)
 	if err != nil {
 		return err
 	}
-	return w.decrypt(encryptedData)
-}
-
-func convertToBigEndianUtf16(input []byte) []byte {
-	temp := utf16.Encode([]rune(string(input)))
-	output := make([]byte, 0, (len(temp)*2)+2)
-	for x := 0; x < len(temp); x++ {
-		tempByte := []byte{0, 0}
-		binary.BigEndian.PutUint16(tempByte, temp[x])
-		output = append(output, tempByte...)
-	}
-	output = append(output, 0, 0)
-	return output
-}
-
-func (w *wallet) decrypt(encryptedData []byte) error {
-	From := convertToBigEndianUtf16(w.password)
-	fillAndAlignBuffer := func(input []byte) []byte {
-		output := append(make([]byte, 0, 64), input...)
-		size := 64 - (len(input) % 64)
-		if size != 64 {
-			for size >= len(input) {
-				output = append(output, input...)
-				size -= len(input)
-			}
-		}
-		if size > 0 {
-			output = append(output, input[:size]...)
-		}
-		return output
-	}
-	To2 := fillAndAlignBuffer(From)   //  append(make([]byte, 0, 64), From...)
-	To3 := fillAndAlignBuffer(w.salt) // append(make([]byte, 0, 64), salt...)
-	produceHash := func(buff1, buff2, buff3 []byte, iter int) []byte {
-		hash := crypto.SHA1.New()
-		hash.Write(buff1)
-		hash.Write(buff2)
-		hash.Write(buff3)
-		result := hash.Sum(nil)
-		for x := 0; x < iter-1; x++ {
-			hash.Reset()
-			hash.Write(result)
-			result = hash.Sum(nil)
-		}
-		return result
-	}
-	hashKey1 := produceHash(bytes.Repeat([]byte{1}, 64), To3, To2, w.sha1Iteration)
-	iv := append(make([]byte, 0), produceHash(bytes.Repeat([]byte{2}, 64), To3, To2, w.sha1Iteration)[:8]...)
-	var key []byte
-	switch w.algType {
-	case 1:
-		key = append(key, hashKey1[:5]...)
-		return errors.New("RC2 wallet decryption is not supported")
-	case 2:
-		// key length = 24
-		key = append(key, hashKey1...)
-		To1 := fillAndAlignBuffer(hashKey1)
-		num3 := 1
-		num4 := 1
-		num5 := 64
-		for num5 > 0 {
-			num5--
-			num6 := num3 + int(To2[num5]) + int(To1[num5])
-			To2[num5] = uint8(num6)
-			num3 = num6 >> 8
-			num7 := num4 + int(To3[num5]) + int(To1[num5])
-			To3[num5] = uint8(num7)
-			num4 = num7 >> 8
-		}
-		hashKey2 := produceHash(bytes.Repeat([]byte{1}, 64), To3, To2, w.sha1Iteration)
-		key = append(key, hashKey2[:4]...)
-		//fmt.Println(bytes.Equal(key, []byte{56, 91, 246, 64, 137, 26, 26, 12, 251, 136, 124, 85, 94, 207, 206, 250, 84, 246, 69, 165, 194, 0, 218, 46}))
-		//fmt.Println(bytes.Equal(iv, []byte{110, 118, 222, 233, 79, 228, 184, 70}))
-		blk, err := des.NewTripleDESCipher(key)
-		if err != nil {
-			return err
-		}
-		decr := cipher.NewCBCDecrypter(blk, iv)
-		output := make([]byte, len(encryptedData))
-		decr.CryptBlocks(output, encryptedData)
-		// remove padding
-		if int(output[len(output)-1]) <= blk.BlockSize() {
-			num := int(output[len(output)-1])
-			padding := bytes.Repeat([]byte{uint8(num)}, num)
-			if bytes.Equal(output[len(output)-num:], padding) {
-				output = output[:len(output)-num]
-			}
-		}
-		return w.readCredentials(output)
-	}
-	return errors.New("unsupported algorithm type")
+	return w.readCredentials(data)
 }
 
 // readCredentials read dsn, usernames and passwords into walletCredentials array
@@ -289,7 +196,7 @@ func (w *wallet) readCredentials(input []byte) error {
 	}
 	//var a []asn1.RawValue
 	for _, tmp := range temp1 {
-		// check the Id of the tmp first
+		// check the ContentType of the tmp first
 		switch tmp.Id.String() {
 		case "1.2.840.113549.1.12.10.1.5":
 			_, err = asn1.Unmarshal(tmp.Data.Bytes, &temp2)
@@ -381,67 +288,80 @@ func (w *wallet) readCredentials(input []byte) error {
 	return nil
 }
 
-func (w *wallet) decodeASN1(buffer []byte) (encryptedData []byte, err error) {
-	type IDBuffer struct {
-		Id   asn1.ObjectIdentifier
-		Data asn1.RawValue
+func (w *wallet) decodeASN1(buffer []byte) (data []byte, err error) {
+	type contentInfo struct {
+		ContentType asn1.ObjectIdentifier
+		Content     asn1.RawValue `asn1:"tag:0,explicit,optional"`
 	}
-	type struct1 struct {
-		Num  int
-		Obj1 IDBuffer
-		Obj2 struct {
-			Obj struct {
-				Obj  IDBuffer
-				Data []byte
-			}
-			Data []byte
-			Num  int
-		}
+	type AlgorithmIdentifier struct {
+		Algorithm  asn1.ObjectIdentifier
+		Parameters asn1.RawValue `asn1:"optional"`
 	}
-	type struct3 struct {
-		Num int
-		Obj struct {
-			Id  asn1.ObjectIdentifier
-			Obj struct {
-				Id  asn1.ObjectIdentifier
-				Obj struct {
-					Salt         []byte
-					IterateCount int
-				}
+	type pfxPdu struct {
+		Version  int
+		AuthSafe contentInfo
+		MacData  struct {
+			Mac struct {
+				Algorithm AlgorithmIdentifier
+				Digest    []byte
 			}
-			EncryptedData asn1.RawValue
-		}
+			MacSalt    []byte
+			Iterations int `asn1:"optional,default:1"`
+		} `asn1:"optional"`
+	}
+	type encryptedContentInfo struct {
+		ContentType                asn1.ObjectIdentifier
+		ContentEncryptionAlgorithm AlgorithmIdentifier
+		EncryptedContent           []byte `asn1:"tag:0,optional"`
+	}
+	type encryptedData struct {
+		Version              int
+		EncryptedContentInfo encryptedContentInfo
+	}
+	type pbeParams struct {
+		Salt       []byte
+		Iterations int
+	}
+
+	type pbes2Params struct {
+		Kdf              AlgorithmIdentifier
+		EncryptionScheme AlgorithmIdentifier
+	}
+	type pbkdf2Params struct {
+		Salt       asn1.RawValue
+		Iterations int
+		KeyLength  int                 `asn1:"optional"`
+		Prf        AlgorithmIdentifier `asn1:"optional"`
 	}
 	var (
-		temp1   struct1
-		temp2   []IDBuffer
-		temp3   struct3
-		buffer2 []byte
+		pfx               pfxPdu
+		authenticatedSafe []contentInfo
+		temp              encryptedData
 	)
-	_, err = asn1.Unmarshal(buffer, &temp1)
+	_, err = asn1.Unmarshal(buffer, &pfx)
 	if err != nil {
 		return
 	}
-	if temp1.Num < 2 {
+	if pfx.Version < 2 {
 		err = errors.New("error in reading wallet")
 		return
 	}
-	if temp1.Obj1.Id.String() != "1.2.840.113549.1.7.1" {
+	if !pfx.AuthSafe.ContentType.Equal(oidDataContentType) {
 		err = errors.New(fmt.Sprintf("error in reading wallet: invalid object ID received: %s, want: %s",
-			temp1.Obj1.Id.String(), "1.2.840.113549.1.7.1"))
+			pfx.AuthSafe.ContentType.String(), "1.2.840.113549.1.7.1"))
 		return
 	}
-	_, err = asn1.Unmarshal(temp1.Obj1.Data.Bytes, &buffer2)
+	_, err = asn1.Unmarshal(pfx.AuthSafe.Content.Bytes, &pfx.AuthSafe.Content)
 	if err != nil {
 		return
 	}
-	_, err = asn1.Unmarshal(buffer2, &temp2)
+	_, err = asn1.Unmarshal(pfx.AuthSafe.Content.Bytes, &authenticatedSafe)
 	if err != nil {
 		return
 	}
 	var index = -1
-	for idx, obj := range temp2 {
-		if obj.Id.String() == "1.2.840.113549.1.7.6" {
+	for idx, obj := range authenticatedSafe {
+		if obj.ContentType.Equal(oidEncryptedDataContentType) {
 			index = idx
 			break
 		}
@@ -451,27 +371,99 @@ func (w *wallet) decodeASN1(buffer []byte) (encryptedData []byte, err error) {
 			"1.2.840.113549.1.7.6"))
 		return
 	}
-
-	_, err = asn1.Unmarshal(temp2[index].Data.Bytes, &temp3)
+	_, err = asn1.Unmarshal(authenticatedSafe[index].Content.Bytes, &temp)
 	if err != nil {
 		return
 	}
-	if temp3.Obj.Id.String() != "1.2.840.113549.1.7.1" {
+	if !temp.EncryptedContentInfo.ContentType.Equal(oidDataContentType) {
 		err = errors.New(fmt.Sprintf("error in reading wallet: invalid object ID received: %s, want: %s",
-			temp3.Obj.Id.String(), "1.2.840.113549.1.7.1"))
+			temp.EncryptedContentInfo.ContentType.String(), "1.2.840.113549.1.7.1"))
 		return
 	}
-	if temp3.Obj.Obj.Id.String() == "1.2.840.113549.1.12.1.3" {
-		w.algType = 2 // "SHA1_3DES_CBC"
-	} else if temp3.Obj.Obj.Id.String() == "1.2.840.113549.1.12.1.6" {
-		w.algType = 1 // "SHA1_RC2_40_CBC"
-	} else {
-		err = errors.New("error in reading wallet: undefined algorithm type")
+	algorithm := temp.EncryptedContentInfo.ContentEncryptionAlgorithm.Algorithm.String()
+	var algo walletAlgorithm
+	switch algorithm {
+	case "1.2.840.113549.1.12.1.6":
+		err = errors.New("RC2 wallet decryption is not supported")
+		return
+	case "1.2.840.113549.1.12.1.3":
+		var params pbeParams
+		_, err = asn1.Unmarshal(temp.EncryptedContentInfo.ContentEncryptionAlgorithm.Parameters.FullBytes, &params)
+		if err != nil {
+			return
+		}
+		algo = &shaWithTripleDESCBC{
+			defaultAlgorithm{
+				password:  w.password,
+				salt:      params.Salt,
+				iteration: params.Iterations,
+			},
+		}
+	case "1.2.840.113549.1.5.13":
+		var params pbes2Params
+		if _, err = asn1.Unmarshal(temp.EncryptedContentInfo.ContentEncryptionAlgorithm.Parameters.FullBytes, &params); err != nil {
+			return
+		}
+
+		if !params.Kdf.Algorithm.Equal(oidPBKDF2) {
+			err = errors.New("kdf algorithm " + params.Kdf.Algorithm.String() + " is not supported")
+			return
+		}
+		var kdfParams pbkdf2Params
+		if _, err = asn1.Unmarshal(params.Kdf.Parameters.FullBytes, &kdfParams); err != nil {
+			return
+		}
+		if kdfParams.Salt.Tag != asn1.TagOctetString {
+			err = errors.New("pkcs12: only octet string salts are supported for pbkdf2")
+			return
+		}
+		//var prf hash.Hash
+		var h func() hash.Hash
+		var keyLen int
+		// get hash type
+		switch {
+		case kdfParams.Prf.Algorithm.Equal(oidHmacWithSHA256):
+			h = sha256.New
+		case kdfParams.Prf.Algorithm.Equal(oidHmacWithSHA1):
+			h = sha1.New
+		case kdfParams.Prf.Algorithm.Equal([]int{}):
+			h = sha1.New
+		default:
+			err = errors.New("pbes2 prf " + kdfParams.Prf.Algorithm.String() + " is not supported")
+			return
+		}
+
+		// get key length
+		switch {
+		case params.EncryptionScheme.Algorithm.Equal(oidAES256CBC):
+			keyLen = 32
+		case params.EncryptionScheme.Algorithm.Equal(oidAES192CBC):
+			keyLen = 24
+		case params.EncryptionScheme.Algorithm.Equal(oidAES128CBC):
+			keyLen = 16
+		default:
+			err = errors.New("pbes2 algorithm " + params.EncryptionScheme.Algorithm.String() + " is not supported")
+			return
+		}
+		algo = &pbkdf2{
+			defaultAlgorithm: defaultAlgorithm{
+				password:  w.password,
+				salt:      kdfParams.Salt.Bytes,
+				iv:        params.EncryptionScheme.Parameters.Bytes,
+				iteration: kdfParams.Iterations,
+			},
+			hash:   h,
+			keyLen: keyLen,
+		}
+	default:
+		err = fmt.Errorf("algorithm %s is not supported", algorithm)
 		return
 	}
-	w.salt = temp3.Obj.Obj.Obj.Salt
-	encryptedData = temp3.Obj.EncryptedData.Bytes
-	w.sha1Iteration = temp3.Obj.Obj.Obj.IterateCount
+	err = algo.create()
+	if err != nil {
+		return
+	}
+	data, err = decrypt(algo, temp.EncryptedContentInfo.EncryptedContent)
 	return
 }
 

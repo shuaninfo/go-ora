@@ -47,6 +47,7 @@ func newLob(connection *Connection) *Lob {
 		connection: connection,
 	}
 }
+
 func (lob *Lob) initialize() {
 	lob.bNullO2U = false
 	lob.sendSize = false
@@ -266,22 +267,22 @@ func (lob *Lob) open(mode, opID int) error {
 
 func (lob *Lob) close(opID int) error {
 	lob.connection.connOption.Tracer.Print("Close Lob: ")
-	if lob.isTemporary() {
-		if lob.sourceLocator[7]&8 == 8 {
-			return errors.New("TTC Error")
-		}
-		lob.sourceLocator[7] &= 0xE7
-		return nil
-	} else {
-		lob.initialize()
-		lob.connection.session.ResetBuffer()
-		lob.writeOp(opID)
-		err := lob.connection.session.Write()
-		if err != nil {
-			return err
-		}
-		return lob.read()
+	//if lob.isTemporary() {
+	//	if lob.sourceLocator[7]&8 == 8 {
+	//		return errors.New("TTC Error")
+	//	}
+	//	lob.sourceLocator[7] &= 0xE7
+	//	return nil
+	//} else {
+	lob.initialize()
+	lob.connection.session.ResetBuffer()
+	lob.writeOp(opID)
+	err := lob.connection.session.Write()
+	if err != nil {
+		return err
 	}
+	return lob.read()
+	//}
 }
 
 func (lob *Lob) writeOp(operationID int) {
@@ -380,19 +381,6 @@ func (lob *Lob) read() error {
 			return err
 		}
 		switch msg {
-		//case 4:
-		//	session.Summary, err = network.NewSummary(session)
-		//	if err != nil {
-		//		return err
-		//	}
-		//	if session.HasError() {
-		//		if session.Summary.RetCode == 1403 {
-		//			session.Summary = nil
-		//		} else {
-		//			return session.GetError()
-		//		}
-		//	}
-		//	loop = false
 		case 8:
 			// read rpa message
 			if len(lob.sourceLocator) != 0 {
@@ -442,40 +430,15 @@ func (lob *Lob) read() error {
 					lob.isNull = true
 				}
 			}
-		//case 9:
-		//	if session.HasEOSCapability {
-		//		temp, err := session.GetInt(4, true, true)
-		//		if err != nil {
-		//			return err
-		//		}
-		//		if session.Summary != nil {
-		//			session.Summary.EndOfCallStatus = temp
-		//		}
-		//	}
-		//	loop = false
 		case 14:
 			// get the data
 			err = lob.readData()
 			if err != nil {
 				return err
 			}
-		//case 15:
-		//	warning, err := network.NewWarningObject(session)
-		//	if err != nil {
-		//		return err
-		//	}
-		//	if warning != nil {
-		//		fmt.Println(warning)
-		//	}
-		//case 23:
-		//	opCode, err := session.GetByte()
-		//	if err != nil {
-		//		return err
-		//	}
-		//	err = lob.connection.getServerNetworkInformation(opCode)
-		//	if err != nil {
-		//		return err
-		//	}
+			//if session.IsBreak() {
+			//	session.RestoreIndex()
+			//}
 		default:
 			err = lob.connection.readResponse(msg)
 			if err != nil {
@@ -497,14 +460,14 @@ func (lob *Lob) read() error {
 			//return errors.New(fmt.Sprintf("TTC error: received code %d during LOB reading", msg))
 		}
 	}
-	if session.IsBreak() {
-		err := (&simpleObject{
-			connection: lob.connection,
-		}).read()
-		if err != nil {
-			return err
-		}
-	}
+	//if session.IsBreak() {
+	//	err := (&simpleObject{
+	//		connection: lob.connection,
+	//	}).read()
+	//	if err != nil {
+	//		return err
+	//	}
+	//}
 	return nil
 }
 

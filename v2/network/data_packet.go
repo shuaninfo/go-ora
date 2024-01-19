@@ -8,27 +8,19 @@ import (
 
 type DataPacket struct {
 	Packet
-	sessionCtx *SessionContext
-	dataFlag   uint16
-	buffer     []byte
+
+	dataFlag uint16
+	buffer   []byte
 }
 
 func (pck *DataPacket) bytes() []byte {
-	output := bytes.Buffer{}
-	temp := make([]byte, 0xA)
-	if pck.sessionCtx.handshakeComplete && pck.sessionCtx.Version >= 315 {
-		binary.BigEndian.PutUint32(temp, pck.length)
-	} else {
-		binary.BigEndian.PutUint16(temp, uint16(pck.length))
-	}
-	temp[4] = uint8(pck.packetType)
-	temp[5] = pck.flag
-	binary.BigEndian.PutUint16(temp[8:], pck.dataFlag)
-	output.Write(temp)
+	output := pck.Packet.bytes()
+	binary.BigEndian.PutUint16(output[8:], pck.dataFlag)
+	ret := bytes.NewBuffer(output)
 	if len(pck.buffer) > 0 {
-		output.Write(pck.buffer)
+		ret.Write(pck.buffer)
 	}
-	return output.Bytes()
+	return ret.Bytes()
 }
 
 func newDataPacket(initialData []byte, sessionCtx *SessionContext) (*DataPacket, error) {
@@ -41,6 +33,8 @@ func newDataPacket(initialData []byte, sessionCtx *SessionContext) (*DataPacket,
 	if sessionCtx.AdvancedService.CryptAlgo != nil {
 		//outputData = make([]byte, len(outputData))
 		//copy(outputData, outputData)
+		tracer := sessionCtx.ConnOption.Tracer
+		tracer.LogPacket("Write packet (Decrypted): ", initialData)
 		initialData, err = sessionCtx.AdvancedService.CryptAlgo.Encrypt(initialData)
 		if err != nil {
 			return nil, err
@@ -53,14 +47,14 @@ func newDataPacket(initialData []byte, sessionCtx *SessionContext) (*DataPacket,
 
 	return &DataPacket{
 		Packet: Packet{
+			sessionCtx: sessionCtx,
 			dataOffset: 0xA,
 			length:     uint32(len(initialData)) + 0xA,
 			packetType: DATA,
 			flag:       0,
 		},
-		sessionCtx: sessionCtx,
-		dataFlag:   0,
-		buffer:     initialData,
+		dataFlag: 0,
+		buffer:   initialData,
 	}, nil
 }
 
@@ -70,14 +64,14 @@ func newDataPacketFromData(packetData []byte, sessionCtx *SessionContext) (*Data
 	}
 	pck := &DataPacket{
 		Packet: Packet{
+			sessionCtx: sessionCtx,
 			dataOffset: 0xA,
 			//length:     binary.BigEndian.Uint16(packetData),
 			packetType: PacketType(packetData[4]),
 			flag:       packetData[5],
 		},
-		sessionCtx: sessionCtx,
-		dataFlag:   binary.BigEndian.Uint16(packetData[8:]),
-		buffer:     packetData[10:],
+		dataFlag: binary.BigEndian.Uint16(packetData[8:]),
+		buffer:   packetData[10:],
 	}
 	if sessionCtx.handshakeComplete && sessionCtx.Version >= 315 {
 		pck.length = binary.BigEndian.Uint32(packetData)
@@ -93,6 +87,8 @@ func newDataPacketFromData(packetData []byte, sessionCtx *SessionContext) (*Data
 		if err != nil {
 			return nil, err
 		}
+		tracer := sessionCtx.ConnOption.Tracer
+		tracer.LogPacket("Read packet (Decrypted): ", pck.buffer)
 	}
 	if sessionCtx.AdvancedService.HashAlgo != nil {
 		pck.buffer, err = sessionCtx.AdvancedService.HashAlgo.Validate(pck.buffer)

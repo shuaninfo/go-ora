@@ -1126,16 +1126,20 @@ func EncodeDate(ti time.Time) []byte {
 	return ret
 }
 
-func EncodeTimeStamp(ti time.Time, withTZ bool) []byte {
+func EncodeTimeStamp(ti time.Time, withTZ, sendAsLocalTime bool) []byte {
+	value := ti
+	if !sendAsLocalTime {
+		value = ti.UTC()
+	}
 	ret := make([]byte, 11)
-	ret[0] = uint8(ti.Year()/100 + 100)
-	ret[1] = uint8(ti.Year()%100 + 100)
-	ret[2] = uint8(ti.Month())
-	ret[3] = uint8(ti.Day())
-	ret[4] = uint8(ti.Hour() + 1)
-	ret[5] = uint8(ti.Minute() + 1)
-	ret[6] = uint8(ti.Second() + 1)
-	binary.BigEndian.PutUint32(ret[7:11], uint32(ti.Nanosecond()))
+	ret[0] = uint8(value.Year()/100 + 100)
+	ret[1] = uint8(value.Year()%100 + 100)
+	ret[2] = uint8(value.Month())
+	ret[3] = uint8(value.Day())
+	ret[4] = uint8(value.Hour() + 1)
+	ret[5] = uint8(value.Minute() + 1)
+	ret[6] = uint8(value.Second() + 1)
+	binary.BigEndian.PutUint32(ret[7:11], uint32(value.Nanosecond()))
 	if withTZ {
 		zoneLoc := ti.Location()
 		zoneID := 0
@@ -1163,6 +1167,16 @@ func EncodeTimeStamp(ti time.Time, withTZ bool) []byte {
 			zone1 := uint8(offset/3600) + 20
 			zone2 := uint8((offset/60)%60) + 60
 			ret = append(ret, zone1, zone2)
+		}
+		if sendAsLocalTime {
+			if ret[11]&0x80 != 0 {
+				ret[12] |= 1
+				if time.Time(value).IsDST() {
+					ret[12] |= 2
+				}
+			} else {
+				ret[11] |= 0x40
+			}
 		}
 
 	}
@@ -1193,10 +1207,13 @@ func DecodeDate(data []byte) (time.Time, error) {
 			int(data[4]-1), int(data[5]-1), int(data[6]-1), nanoSec, time.UTC), nil
 	}
 	var zone *time.Location
+	var timeInZone bool
 	//var err error
+	//fmt.Println(data)
 	if data[11]&0x80 != 0 {
 		var regionCode = (int(data[11]) & 0x7F) << 6
 		regionCode += (int(data[12]) & 0xFC) >> 2
+		timeInZone = data[12]&0x1 == 1
 		name, found := oracleZones[regionCode]
 		if found {
 			zone, _ = time.LoadLocation(name)
@@ -1213,8 +1230,12 @@ func DecodeDate(data []byte) (time.Time, error) {
 		//	return time.Date(year, time.Month(data[2]), int(data[3]),
 		//		int(data[4]-1)+tzHour, int(data[5]-1)+tzMin, int(data[6]-1), nanoSec, loc.Location()), nil
 		//}
+	} else {
+		timeInZone = data[11]&0x40 == 0x40
 	}
 	if zone == nil {
+		zone = time.FixedZone(fmt.Sprintf("%+03d:%02d", tzHour, tzMin), tzHour*60*60+tzMin*60)
+		//timeInZone = true
 		if tzHour < 0 || tzMin < 0 {
 			offset := tzHour*60*60 + tzMin*60
 			if tzHour < 0 {
@@ -1228,8 +1249,13 @@ func DecodeDate(data []byte) (time.Time, error) {
 			zone = time.FixedZone(fmt.Sprintf("%+03d:%02d", tzHour, tzMin), tzHour*60*60+tzMin*60)
 		}
 	}
-	return time.Date(year, time.Month(data[2]), int(data[3]),
-		int(data[4]-1), int(data[5]-1), int(data[6]-1), nanoSec, zone), nil
+	if timeInZone {
+		return time.Date(year, time.Month(data[2]), int(data[3]),
+			int(data[4]-1), int(data[5]-1), int(data[6]-1), nanoSec, zone), nil
+	}
+	ret := time.Date(year, time.Month(data[2]), int(data[3]),
+		int(data[4]-1), int(data[5]-1), int(data[6]-1), nanoSec, time.UTC)
+	return ret.In(zone), nil
 	//return time.Date(year, time.Month(data[2]), int(data[3]),
 	//	int(data[4]-1)+tzHour, int(data[5]-1)+tzMin, int(data[6]-1), nanoSec, time.UTC), nil
 }
