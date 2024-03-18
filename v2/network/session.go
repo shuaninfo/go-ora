@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql/driver"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shuaninfo/go-ora/v2/trace"
@@ -38,24 +40,21 @@ type SessionState struct {
 }
 
 type Session struct {
-	ctx            context.Context
-	oldCtx         context.Context
-	conn           net.Conn
-	sslConn        *tls.Conn
-	reader         *bufio.Reader
-	remainingBytes int
-	lastPacket     bytes.Buffer
-	//connOption        ConnectionOption
+	//ctx               context.Context
+	//oldCtx            context.Context
+	mu                sync.Mutex
+	conn              net.Conn
+	sslConn           *tls.Conn
+	reader            *bufio.Reader
+	remainingBytes    int
+	lastPacket        bytes.Buffer
 	Context           *SessionContext
 	sendPcks          []PacketInterface
 	inBuffer          []byte
 	outBuffer         bytes.Buffer
 	index             int
 	breakIndex        int
-	isFinalPacketRead bool
-	//key               []byte
-	//salt              []byte
-	//verifierType      int
+	doneContext       []chan struct{}
 	TimeZone          []byte
 	TTCVersion        uint8
 	HasEOSCapability  bool
@@ -67,15 +66,15 @@ type Session struct {
 	UseBigScn         bool
 	ClrChunkSize      int
 	breakConn         bool
-	resetConn         bool
-	SSL               struct {
+	Connected         bool
+	//resetConn         bool
+	SSL struct {
 		CertificateRequest []*x509.CertificateRequest
 		PrivateKeys        []*rsa.PrivateKey
 		Certificates       []*x509.Certificate
 		roots              *x509.CertPool
 		tlsCertificates    []tls.Certificate
 	}
-	//certificates      []*x509.Certificate
 }
 
 func NewSessionWithInputBufferForDebug(input []byte) *Session {
@@ -88,7 +87,7 @@ func NewSessionWithInputBufferForDebug(input []byte) *Session {
 		Tracer: trace.NilTracer(),
 	}
 	return &Session{
-		ctx:        context.Background(),
+		//ctx:        context.Background(),
 		conn:       nil,
 		inBuffer:   input,
 		index:      0,
@@ -103,7 +102,7 @@ func NewSessionWithInputBufferForDebug(input []byte) *Session {
 func NewSession(connOption *ConnectionOption) *Session {
 
 	return &Session{
-		ctx:             context.Background(),
+		//ctx:             context.Background(),
 		conn:            nil,
 		inBuffer:        nil,
 		index:           0,
@@ -118,6 +117,8 @@ func NewSession(connOption *ConnectionOption) *Session {
 // SaveState save current session state and accept new state
 // if new state is nil the session will be resetted
 func (session *Session) SaveState(newState *SessionState) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
 	session.states = append(session.states, SessionState{
 		summary:   session.Summary,
 		sendPcks:  session.sendPcks,
@@ -174,17 +175,60 @@ func (session *Session) resetRead() {
 
 // ResetBuffer empty in and out buffer and set read index to 0
 func (session *Session) ResetBuffer() {
+	session.mu.Lock()
+	defer session.mu.Unlock()
 	session.Summary = nil
 	session.resetWrite()
 	session.resetRead()
 }
 
 func (session *Session) StartContext(ctx context.Context) {
-	session.oldCtx = session.ctx
-	session.ctx = ctx
+	//session.oldCtx = session.ctx
+	//session.ctx = ctx
+	done := make(chan struct{})
+	session.doneContext = append(session.doneContext, done)
+	go func(idone chan struct{}, mu *sync.Mutex) {
+		//mu.Lock()
+		//defer mu.Unlock()
+		var err error
+		var tracer = session.Context.ConnOption.Tracer
+		select {
+		case <-idone:
+			return
+		case <-ctx.Done():
+			if session.Connected {
+				if err = session.BreakConnection(); err != nil {
+					tracer.Print("Connection Break Error: ", err)
+				}
+			} else {
+				err = session.WriteFinalPacket()
+				if err != nil {
+					tracer.Print("Write Final Packet With Error: ", err)
+				}
+				session.Disconnect()
+			}
+		}
+	}(done, &session.mu)
 }
 func (session *Session) EndContext() {
-	session.ctx = session.oldCtx
+	index := len(session.doneContext) - 1
+	if index >= 0 {
+		done := session.doneContext[index]
+		if done != nil {
+			close(done)
+			done = nil
+		}
+	}
+	if index == 0 {
+		session.doneContext = nil
+	} else {
+		session.doneContext = session.doneContext[:index]
+	}
+	//if session.doneContext != nil {
+	//	close(session.doneContext)
+	//	session.doneContext = nil
+	//}
+	//session.ctx = session.oldCtx
 }
 
 func (session *Session) initRead() error {
@@ -193,13 +237,15 @@ func (session *Session) initRead() error {
 	if session.Context.ConnOption.Timeout > 0 {
 		timeout = time.Now().Add(session.Context.ConnOption.Timeout)
 	}
-	if deadline, ok := session.ctx.Deadline(); ok && !session.IsBreak() {
-		timeout = deadline
-	}
+	//if deadline, ok := session.ctx.Deadline(); ok && !session.IsBreak() {
+	//	timeout = deadline
+	//}
 	if session.sslConn != nil {
 		err = session.sslConn.SetReadDeadline(timeout)
-	} else {
+	} else if session.conn != nil {
 		err = session.conn.SetReadDeadline(timeout)
+	} else {
+		return errors.New("attempt to set timeout on closed connection")
 	}
 	return err
 }
@@ -210,13 +256,15 @@ func (session *Session) initWrite() error {
 	if session.Context.ConnOption.Timeout > 0 {
 		timeout = time.Now().Add(session.Context.ConnOption.Timeout)
 	}
-	if deadline, ok := session.ctx.Deadline(); ok && !session.IsBreak() {
-		timeout = deadline
-	}
+	//if deadline, ok := session.ctx.Deadline(); ok && !session.IsBreak() {
+	//	timeout = deadline
+	//}
 	if session.sslConn != nil {
 		err = session.sslConn.SetWriteDeadline(timeout)
-	} else {
+	} else if session.conn != nil {
 		err = session.conn.SetWriteDeadline(timeout)
+	} else {
+		return errors.New("attempt to set timeout on closed connection")
 	}
 	return err
 }
@@ -289,7 +337,9 @@ func (session *Session) negotiate() {
 }
 
 func (session *Session) ResetBreak() {
+	session.mu.Lock()
 	session.breakConn = false
+	session.mu.Unlock()
 }
 
 // IsBreak tell if the connection break elicit
@@ -368,35 +418,36 @@ func (session *Session) RestoreIndex() bool {
 }
 
 // BreakConnection elicit connetion break to cancel the current operation
-func (session *Session) BreakConnection() (PacketInterface, error) {
+func (session *Session) BreakConnection() error {
 	tracer := session.Context.ConnOption.Tracer
 	tracer.Print("Break Connection")
-	session.breakConn = true
-	session.resetConn = false
 	var err error
+	//first discard remaining bytes
+	//if session.remainingBytes > 0 {
+	//	_, err = session.readPacket()
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//}
 
 	done := false
-
-	// first discard remaining bytes
-	if session.remainingBytes > 0 {
-		_, err = session.readPacket()
-		if err != nil {
-			return nil, err
-		}
-	}
 	if session.Context.NegotiatedOptions&0x400 > 0 {
 		done, err = sendOOB(session.conn)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if !done {
 		err = session.writePacket(newMarkerPacket(marker_type_interrupt, session.Context))
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return session.readPacket()
+	session.mu.Lock()
+	session.breakConn = true
+	session.mu.Unlock()
+	return nil
+	//return session.readPacket()
 	//session.ResetBuffer()
 	//if done {
 	//	err = session.writePacket(newMarkerPacket(2, session.Context))
@@ -427,8 +478,6 @@ func (session *Session) BreakConnection() (PacketInterface, error) {
 // then send connect packet to the server and
 // receive either accept, redirect or refuse packet
 func (session *Session) Connect(ctx context.Context) error {
-	session.StartContext(ctx)
-	defer session.EndContext()
 	connOption := session.Context.ConnOption
 	session.Disconnect()
 	connOption.Tracer.Print("Connect")
@@ -508,8 +557,10 @@ func (session *Session) Connect(ctx context.Context) error {
 	}
 
 	if acceptPacket, ok := pck.(*AcceptPacket); ok {
+		session.mu.Lock()
 		*session.Context = *acceptPacket.sessionCtx
 		session.Context.handshakeComplete = true
+		session.mu.Unlock()
 		connOption.Tracer.Print("Handshake Complete")
 		return nil
 	}
@@ -623,7 +674,9 @@ func (session *Session) Write() error {
 func (session *Session) processMarker() error {
 	var err error
 	// send reset connection
+	session.mu.Lock()
 	session.resetWrite()
+	session.mu.Unlock()
 	marker := newMarkerPacket(marker_type_reset, session.Context)
 	err = session.writePacket(marker)
 	if err != nil {
@@ -704,38 +757,69 @@ func (session *Session) processMarker() error {
 	//}
 }
 
+func (session *Session) Peek(numBytes int) ([]byte, error) {
+	oldIndex := session.index
+	ret, err := session.read(numBytes)
+	session.index = oldIndex
+	return ret, err
+}
+
 // Read numBytes of data from input buffer if requested data is larger
 // than input buffer session will get the remaining from network stream
 func (session *Session) read(numBytes int) ([]byte, error) {
-	for session.index+numBytes > len(session.inBuffer) {
-		pck, err := session.readPacket()
-		if err != nil {
-			if e, ok := err.(net.Error); ok && e.Timeout() {
-				var breakErr error
-				session.Context.ConnOption.Tracer.Print("Read Timeout")
-				pck, breakErr = session.BreakConnection()
-				if breakErr != nil {
-					//return nil, err
-					session.Context.ConnOption.Tracer.Print("Connection Break With Error: ", breakErr)
-					return nil, err
-				}
-			} else {
-				return nil, err
-			}
+	var err error
+	var pck PacketInterface
+	//tracer := session.Context.ConnOption.Tracer
 
+	requiredLen := numBytes
+
+	//first discard remaining bytes
+	//if session.remainingBytes > 0 {
+	//	_, err = session.readPacket()
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//}
+	for session.index+numBytes > len(session.inBuffer) {
+		// if break connection send break message
+		if session.IsBreak() {
+			//_, err = session.BreakConnection()
+			//if err != nil {
+			//	return nil, err
+			//}
+			session.ResetBreak()
+		}
+		pck, err = session.readPacket()
+		if err != nil {
+			//if e, ok := err.(net.Error); ok && e.Timeout() {
+			//	var breakErr error
+			//	tracer.Print("Read Timeout")
+			//	pck, breakErr = session.BreakConnection()
+			//	if breakErr != nil {
+			//		//return nil, err
+			//		tracer.Print("Connection Break With Error: ", breakErr)
+			//		return nil, err
+			//	}
+			//} else {
+			//	return nil, err
+			//}
+			return nil, err
 		}
 
-		if session.IsBreak() {
-			for pck == nil {
-				pck, err = session.readPacket()
-				if err != nil {
-					return nil, err
-				}
-			}
-		} else {
-			if pck == nil {
-				continue
-			}
+		//if session.IsBreak() {
+		//	for pck == nil {
+		//		pck, err = session.readPacket()
+		//		if err != nil {
+		//			return nil, err
+		//		}
+		//	}
+		//} else {
+		//	if pck == nil {
+		//		continue
+		//	}
+		//}
+		if pck == nil {
+			continue
 		}
 		if _, ok := pck.(*MarkerPacket); ok {
 			session.breakIndex = len(session.inBuffer)
@@ -743,11 +827,13 @@ func (session *Session) read(numBytes int) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+			session.index = session.breakIndex
+			//session.ResetBreak()
+			return nil, ErrConnReset
 		} else {
 			return nil, fmt.Errorf("receive abnormal packet type %d instead of data packet", pck.getPacketType())
 		}
 		//pcks := []PacketInterface{pck}
-
 		//for _, pck := range pcks {
 		//	if dataPck, ok := pck.(*DataPacket); ok {
 		//		session.inBuffer = append(session.inBuffer, dataPck.buffer...)
@@ -755,12 +841,12 @@ func (session *Session) read(numBytes int) ([]byte, error) {
 		//		return nil, errors.New("the packet received is not data packet")
 		//	}
 		//}
-		if session.IsBreak() {
-			if session.index+numBytes > len(session.inBuffer) {
-				numBytes = len(session.inBuffer) - session.index
-			}
-			break
-		}
+		//if session.IsBreak() {
+		//	if session.index+numBytes > len(session.inBuffer) {
+		//		numBytes = len(session.inBuffer) - session.index
+		//	}
+		//	break
+		//}
 	}
 	//for session.index+numBytes > len(session.inBuffer) {
 	//	tempPck, err := session.readPacket()
@@ -793,11 +879,16 @@ func (session *Session) read(numBytes int) ([]byte, error) {
 	//}
 	ret := session.inBuffer[session.index : session.index+numBytes]
 	session.index += numBytes
+	if len(ret) < requiredLen {
+		return nil, errors.New("buffer underrun during read operation")
+	}
 	return ret, nil
 }
 
 // Write a packet to the network stream
 func (session *Session) writePacket(pck PacketInterface) error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
 	session.sendPcks = append(session.sendPcks, pck)
 	tracer := session.Context.ConnOption.Tracer
 	tmp := pck.bytes()
@@ -808,21 +899,23 @@ func (session *Session) writePacket(pck PacketInterface) error {
 	}
 	if session.sslConn != nil {
 		_, err = session.sslConn.Write(tmp)
-	} else {
+	} else if session.conn != nil {
 		_, err = session.conn.Write(tmp)
+	} else {
+		return errors.New("attempt to write on closed connection")
 	}
 	return err
 }
 
 // HasError Check if the session has error or not
 func (session *Session) HasError() bool {
-	return session.Summary != nil && session.Summary.RetCode != 0
+	return session.Summary != nil && (session.Summary.RetCode != 0 && session.Summary.RetCode != 1403)
 }
 
 // GetError Return the error in form or OracleError
 func (session *Session) GetError() *OracleError {
 	err := &OracleError{}
-	if session.Summary != nil && session.Summary.RetCode != 0 {
+	if session.HasError() {
 		err.ErrCode = session.Summary.RetCode
 		if session.StrConv != nil {
 			err.ErrMsg = session.StrConv.Decode(session.Summary.ErrorMessage)
@@ -916,7 +1009,7 @@ func (session *Session) readPacket() (PacketInterface, error) {
 	packetData := session.lastPacket.Bytes()
 	pckType := PacketType(packetData[4])
 	flag := packetData[5]
-	session.isFinalPacketRead = flag&0x20 > 0
+	//session.isFinalPacketRead = flag&0x20 > 0
 	//log.Printf("Response: %#v\n\n", packetData)
 	switch pckType {
 	case RESEND:
@@ -924,20 +1017,47 @@ func (session *Session) readPacket() (PacketInterface, error) {
 			session.negotiate()
 			session.reader = bufio.NewReaderSize(session.sslConn, read_buffer_size)
 		}
-		for _, pck := range session.sendPcks {
-			//log.Printf("Request: %#v\n\n", pck.bytes())
-			err := session.initWrite()
-			if err != nil {
-				return nil, err
+		var resend = func() error {
+			session.mu.Lock()
+			defer session.mu.Unlock()
+			for _, pck := range session.sendPcks {
+				err := session.initWrite()
+				if err != nil {
+					return err
+				}
+				if session.sslConn != nil {
+					_, err = session.sslConn.Write(pck.bytes())
+				} else if session.conn != nil {
+					_, err = session.conn.Write(pck.bytes())
+				} else {
+					err = errors.New("attempt to write on closed connection")
+				}
+				if err != nil {
+					return err
+				}
 			}
-			if session.Context.ConnOption.SSL {
-				_, err = session.sslConn.Write(pck.bytes())
-			} else {
-				_, err = session.conn.Write(pck.bytes())
-			}
-			if err != nil {
-				return nil, err
-			}
+			return nil
+		}
+		//for _, pck := range session.sendPcks {
+		//	//log.Printf("Request: %#v\n\n", pck.bytes())
+		//	err := session.initWrite()
+		//	if err != nil {
+		//		return nil, err
+		//	}
+		//	if session.sslConn != nil {
+		//		_, err = session.sslConn.Write(pck.bytes())
+		//	} else if session.conn != nil {
+		//		_, err = session.conn.Write(pck.bytes())
+		//	} else {
+		//		return nil, errors.New("attempt to write on closed connection")
+		//	}
+		//	if err != nil {
+		//		return nil, err
+		//	}
+		//}
+		err = resend()
+		if err != nil {
+			return nil, err
 		}
 		return session.readPacket()
 	case ACCEPT:
@@ -974,6 +1094,11 @@ func (session *Session) readPacket() (PacketInterface, error) {
 			if session.Context.ConnOption.SSL && (dataPck.dataFlag&0x8000 > 0 || dataPck.flag&0x80 > 0) {
 				session.negotiate()
 				session.reader = bufio.NewReaderSize(session.sslConn, read_buffer_size)
+			}
+			if dataPck.dataFlag == 0x40 {
+				// close connection
+				session.Disconnect()
+				err = driver.ErrBadConn
 			}
 			session.inBuffer = append(session.inBuffer, dataPck.buffer...)
 		}
@@ -1509,7 +1634,7 @@ func (session *Session) GetClr() (output []byte, err error) {
 	if err != nil {
 		return
 	}
-	if nb == 0 || nb == 0xFF {
+	if nb == 0 || nb == 0xFF || nb == 0xFD {
 		output = nil
 		err = nil
 		return
@@ -1519,6 +1644,9 @@ func (session *Session) GetClr() (output []byte, err error) {
 	var tempBuffer bytes.Buffer
 	if chunkSize == 0xFE {
 		for chunkSize > 0 {
+			//if session.IsBreak() {
+			//	break
+			//}
 			if session.UseBigClrChunks {
 				chunkSize, err = session.GetInt(4, true, true)
 			} else {
@@ -1730,6 +1858,16 @@ func (session *Session) WriteInt(buffer *bytes.Buffer, number interface{}, size 
 			buffer.Write(temp)
 		}
 	}
+}
+
+func (session *Session) WriteFixedClr(buffer *bytes.Buffer, data []byte) {
+	if len(data) > 0xFC {
+		buffer.WriteByte(0xFE)
+		session.WriteUint(buffer, len(data), 4, true, false)
+	} else {
+		buffer.WriteByte(uint8(len(data)))
+	}
+	buffer.Write(data)
 }
 
 func (session *Session) WriteClr(buffer *bytes.Buffer, data []byte) {

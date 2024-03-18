@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -337,6 +338,7 @@ type ConnectionString struct {
 	DBAPrivilege DBAPrivilege
 	password     string
 	Trace        string // Trace file
+	traceDir     string
 	WalletPath   string
 	walletPass   string
 	w            *wallet
@@ -575,6 +577,18 @@ func newConnectionStringFromUrl(databaseUrl string) (*ConnectionString, error) {
 			ret.connOption.SessionInfo.Timeout = time.Second * time.Duration(to)
 		case "TRACE FILE":
 			ret.Trace = val[0]
+		case "TRACE DIR":
+			fallthrough
+		case "TRACE FOLDER":
+			fallthrough
+		case "TRACE DIRECTORY":
+			ret.traceDir = val[0]
+		case "USE_OOB":
+			fallthrough
+		case "ENABLE_OOB":
+			fallthrough
+		case "ENABLE URGENT DATA TRANSPORT":
+			ret.connOption.EnableOOB = true
 		case "PREFETCH_ROWS":
 			ret.connOption.PrefetchRows, err = strconv.Atoi(val[0])
 			if err != nil {
@@ -604,10 +618,10 @@ func newConnectionStringFromUrl(databaseUrl string) (*ConnectionString, error) {
 			tempVal := strings.ToUpper(val[0])
 			if tempVal == "PRE" {
 				ret.connOption.Lob = 0
-			} else if tempVal == "POST" {
+			} else if tempVal == "POST" || tempVal == "STREAM" {
 				ret.connOption.Lob = 1
 			} else {
-				return nil, errors.New("LOB FETCH value should be: PRE(default) or POST")
+				return nil, errors.New("LOB FETCH value should be: PRE(default) or POST or STREAM")
 			}
 		case "LANGUAGE":
 			ret.connOption.Language = val[0]
@@ -620,6 +634,8 @@ func newConnectionStringFromUrl(databaseUrl string) (*ConnectionString, error) {
 			if err != nil {
 				return nil, err
 			}
+		case "PROGRAM":
+			ret.connOption.ClientInfo.ProgramName = val[0]
 		default:
 			return nil, fmt.Errorf("unknown URL option: %s", key)
 			//else if tempVal == "IMPLICIT" || tempVal == "AUTO" {
@@ -815,13 +831,11 @@ func (connStr *ConnectionString) validate() error {
 		}
 	}
 	connStr.connOption.HostName, _ = os.Hostname()
-	idx = strings.LastIndex(os.Args[0], "/")
-	idx++
-	if idx < 0 {
-		idx = 0
-	}
+
 	connStr.connOption.ProgramPath = os.Args[0]
-	connStr.connOption.ProgramName = os.Args[0][idx:]
+	if connStr.connOption.ProgramName == "" {
+		connStr.connOption.ProgramName = filepath.Base(os.Args[0])
+	}
 	connStr.connOption.DriverName = "OracleClientGo"
 	connStr.connOption.PID = os.Getpid()
 	return nil

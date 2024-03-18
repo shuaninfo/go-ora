@@ -506,11 +506,39 @@ complete code can be found in [examples/struct_par](https://github.com/sijms/go-
 > you can also pass an array of tagged structure to do same thing.
 > complete code for bulk-insert/merge can be found in [examples/merge](https://github.com/sijms/go-ora/blob/master/examples/merge/main.go)
 
-* ### UDT
-* Created inside oracle using `create type`
-* `UDT` mapped to golang struct type.
-* To use UDT you should create struct with `udt` tag then call `go_ora.RegisterType(...)`
-* complete code is found in [examples/UDT](https://github.com/sijms/go-ora/blob/master/examples/UDT/main.go)
+* ### Oracle Objects (user defined types)
+> * Created inside oracle using `create type`
+> * objects are mapped to golang struct type defined with tag udt followed by field name.
+> ```golang
+>  type Customer struct {
+>    ID int `udt:"ID"`
+>    Name string `udt:"NAME"`
+> }
+> ```
+> * each object should register with `go_ora.RegisterType` or `go_ora.RegisterTypeWithOwner`
+passing typeName, arrayTypeName (for that type or empty) and empty instance of struct
+> * driver support nested type start from (v2.8.5)
+> * for array of regular type (v2.8.7) pass regular type name, arrayTypeName and nil for object instance
+> * regular type supported
+>   * number
+>   * varchar2
+>   * nvarchar2
+>   * date
+>   * timestamp
+>   * timestamp with local time zone
+>   * RAW
+>   * BLOB
+>   * CLOB
+>   * NCLOB
+> * to pass oracle object as a parameter efficiently use `go_ora.Object{Owner: owner, Name: name, Value: val}`
+> * regular type array should be passed wrapped inside go_ora.Object otherwise it will be interpreted as associative array
+> * complete code is found in 
+>   * [examples/UDT](https://github.com/sijms/go-ora/blob/master/examples/UDT/main.go)
+>   * [examples/nested_udt_array](https://github.com/sijms/go-ora/blob/master/examples/nested_udt_array/main.go) a complete example of nested objects (2 level), nested arrays 
+>   as input/output parameters
+>   * [examples/regular_type_array](https://github.com/sijms/go-ora/blob/master/examples/regular_type_array/main.go) a complete example for all supported regullar type arrays
+>   * [examples/null_udt](https://github.com/sijms/go-ora/blob/master/examples/null_udt/main.go) example represent null object as input and output
+>   * [examples/varray](https://github.com/sijms/go-ora/blob/master/examples/varray/main.go) for varray types
 
 * ### RefCursor
 > as an output parameter
@@ -612,6 +640,21 @@ complete code for mapping refcursor to sql.Rows is found in [example/refcursor_t
 [//]: # (### Supported DBMS features)
 ### releases
 <details>
+
+### version 2.8.8
+* introduce new connection break using go-routines thanks to @rheilek
+* return BLOB as longRAW and CLOB,NCLOB as LONG in lob prefetch mode so supported 
+data size increased from 32KB to 1GB
+* fix issue in bulk insert when pass data types
+* add `lob fetch=stream` which is equal to `lob fetch=post`
+* testing file [prefetch large blob](https://github.com/sijms/go-ora/blob/v2.8.8/v2/TestIssues/prefetch_large_blob_test.go)
+
+### version 2.8.7
+* add support for regular type array
+* add support for nested null object and array
+* introduce new type `go_ora.Object{Owner: owner, Name: name, Value: val}` for passing input/output oracle objects
+* fix issue  int is truncate to 9223372036854775807 for larger values
+* fix issue loss of time fraction in timestamp
 
 ### version 2.8.6
 * add support for nested user define type (UDT) array. 

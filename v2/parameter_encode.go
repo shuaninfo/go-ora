@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/shuaninfo/go-ora/v2/converters"
@@ -18,6 +19,34 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 	}
 	for goType.Kind() == reflect.Ptr {
 		goType = goType.Elem()
+	}
+	if goType == tyObject {
+		val, err := getValue(value)
+		if err != nil {
+			return err
+		}
+		if obj, ok := val.(Object); ok {
+			par.DataType = XMLType
+			par.Value = obj.Value
+			// set custom type
+			for name, cusTyp := range conn.cusTyp {
+				if strings.EqualFold(name, obj.Name) {
+					par.cusType = new(customType)
+					*par.cusType = cusTyp
+					par.ToID = cusTyp.toid
+					if cusTyp.isArray {
+						par.MaxNoOfArrayElements = 1
+					} else {
+						par.Version = 1
+					}
+					break
+				}
+			}
+			if par.cusType == nil {
+				return fmt.Errorf("type %s is not created or not registered", obj.Name)
+			}
+			return nil
+		}
 	}
 	if goType != tyBytes && (goType.Kind() == reflect.Array || goType.Kind() == reflect.Slice) {
 		val, err := getValue(value)
@@ -32,14 +61,32 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 				inVal = rValue.Index(0).Interface()
 			}
 		}
-		err = par.setDataType(goType.Elem(), inVal, conn)
-		if par.cusType != nil {
-			par.cusType.isArray = true
-			par.ToID = par.cusType.arrayTOID
-		}
 		par.Flag = 0x43
+		err = par.setDataType(goType.Elem(), inVal, conn)
+		if err != nil {
+			return err
+		}
+		if par.DataType == XMLType {
+			// par.cusType is for item I should get that of array
+			found := false
+			for _, cust := range conn.cusTyp {
+				if cust.isArray && len(cust.attribs) > 0 {
+					if par.cusType.name == cust.attribs[0].cusType.name {
+						found = true
+						//par.TypeName = name
+						par.ToID = cust.toid
+						*par.cusType = cust
+						par.Flag = 0x3
+						break
+					}
+				}
+			}
+			if !found {
+				return fmt.Errorf("can't get the collection of type %s", par.cusType.name)
+			}
+		}
 		par.MaxNoOfArrayElements = 1
-		return err
+		return nil
 	}
 	if tNumber(goType) || tNullNumber(goType) {
 		par.DataType = NUMBER
@@ -48,6 +95,9 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 	}
 
 	switch goType {
+	case tyNumber:
+		par.DataType = NUMBER
+		par.MaxLen = converters.MAX_LEN_NUMBER
 	case tyPLBool:
 		par.DataType = Boolean
 		par.MaxLen = converters.MAX_LEN_BOOL
@@ -62,7 +112,7 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 		par.ContFlag = 16
 		par.CharsetID = conn.tcpNego.ServernCharset
 	case tyTime, tyNullTime:
-		if par.Flag&0x43 > 0 {
+		if par.Flag&0x40 > 0 {
 			par.DataType = DATE
 			par.MaxLen = converters.MAX_LEN_DATE
 		} else {
@@ -70,13 +120,13 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 			par.MaxLen = converters.MAX_LEN_TIMESTAMP
 		}
 	case tyTimeStamp, tyNullTimeStamp:
-		if par.Flag&0x43 > 0 {
-			par.DataType = TIMESTAMP
-			par.MaxLen = converters.MAX_LEN_DATE
-		} else {
-			par.DataType = TimeStampTZ_DTY
-			par.MaxLen = converters.MAX_LEN_TIMESTAMP
-		}
+		//if par.Flag&0x43 > 0 {
+		par.DataType = TIMESTAMP
+		par.MaxLen = converters.MAX_LEN_DATE
+		//} else {
+		//	par.DataType = TimeStampTZ_DTY
+		//	par.MaxLen = converters.MAX_LEN_TIMESTAMP
+		//}
 	case tyTimeStampTZ, tyNullTimeStampTZ:
 		par.DataType = TimeStampTZ_DTY
 		par.MaxLen = converters.MAX_LEN_TIMESTAMP
@@ -151,6 +201,7 @@ func (par *ParameterInfo) setDataType(goType reflect.Type, value driver.Value, c
 					par.cusType = new(customType)
 					*par.cusType = cusTyp
 					par.ToID = cusTyp.toid
+					//par.TypeName = cusTyp.name
 				}
 			}
 			if par.cusType == nil {
@@ -174,20 +225,37 @@ func (par *ParameterInfo) encodeWithType(connection *Connection) error {
 		return err
 	}
 	if val == nil {
+		par.IsNull = true
 		par.iPrimValue = nil
 		return nil
 	}
 	// check if array
+	//if par.MaxNoOfArrayElements > 0 && par.cusType == nil {
 	if par.MaxNoOfArrayElements > 0 {
+		if !isArrayValue(val) {
+			return fmt.Errorf("parameter %s require array value", par.Name)
+		}
+		var size int
 		rValue := reflect.ValueOf(val)
-		size := rValue.Len()
+		if isArrayValue(val) {
+			size = rValue.Len()
+		}
+		if size == 0 {
+			par.IsNull = true
+			par.iPrimValue = nil
+			return nil
+		}
 		if size > par.MaxNoOfArrayElements {
 			par.MaxNoOfArrayElements = size
 		}
-
 		pars := make([]ParameterInfo, 0, size)
+		var tempPar ParameterInfo
 		for x := 0; x < size; x++ {
-			var tempPar = par.clone()
+			if par.cusType != nil && par.cusType.isArray {
+				tempPar = par.cusType.attribs[0].clone()
+			} else {
+				tempPar = par.clone()
+			}
 			if rValue.Index(x).CanInterface() {
 				tempPar.Value = rValue.Index(x).Interface()
 			}
@@ -198,7 +266,6 @@ func (par *ParameterInfo) encodeWithType(connection *Connection) error {
 			pars = append(pars, tempPar)
 		}
 		par.iPrimValue = pars
-
 		return nil
 	}
 	switch par.DataType {
@@ -208,7 +275,7 @@ func (par *ParameterInfo) encodeWithType(connection *Connection) error {
 			return err
 		}
 	case NUMBER:
-		par.iPrimValue, err = getNumber(val)
+		par.iPrimValue, err = NewNumber(val)
 		if err != nil {
 			return err
 		}
@@ -251,6 +318,7 @@ func (par *ParameterInfo) encodeWithType(connection *Connection) error {
 			//}
 			par.MaxLen = 1
 			par.iPrimValue = nil
+			par.IsNull = true
 		}
 	case OCIFileLocator:
 		if value, ok := val.(BFile); ok {
@@ -262,72 +330,69 @@ func (par *ParameterInfo) encodeWithType(connection *Connection) error {
 				par.iPrimValue = &value
 			} else {
 				par.iPrimValue = nil
+				par.IsNull = true
 			}
 		}
 	case REFCURSOR:
 		par.iPrimValue = nil
+		par.IsNull = true
 	case XMLType:
 		rValue := reflect.ValueOf(val)
-		var objectBuffer bytes.Buffer
-		pars := getUDTAttributes(par.cusType, rValue)
-
-		for _, attrib := range pars {
+		pars := make([]ParameterInfo, 0, 10)
+		// if value is null or value is not struct ==> pass null for the object
+		if !rValue.IsValid() || rValue.Kind() != reflect.Struct || (rValue.Kind() == reflect.Ptr && rValue.IsNil()) {
+			par.IsNull = true
+			par.iPrimValue = nil
+			return nil
+		}
+		for _, attrib := range par.cusType.attribs {
 			attrib.Direction = par.Direction
-			// see if the attrib.Value is array?
-			if isArrayValue(attrib.Value) {
-				attrib.MaxNoOfArrayElements = 1
-			}
-			err = attrib.encodeWithType(connection)
-			if err != nil {
-				return err
-			}
-			err = attrib.encodePrimValue(connection)
-			if err != nil {
-				return err
-
-			}
-			if attrib.DataType == OCIFileLocator && attrib.MaxLen == 0 {
-				attrib.MaxLen = 4000
-			}
-			if attrib.Direction == Output {
-				attrib.BValue = nil
-			}
-			if attrib.DataType == XMLType && attrib.cusType != nil && attrib.cusType.isArray {
-				dataSize := len(attrib.BValue)
-				if dataSize > 0xFC {
-					objectBuffer.WriteByte(0xFE)
-					connection.session.WriteUint(&objectBuffer, dataSize, 4, true, false)
-				} else {
-					objectBuffer.WriteByte(uint8(dataSize))
+			attrib.parent = par
+			if fieldIndex, ok := par.cusType.fieldMap[attrib.Name]; ok {
+				if rValue.Field(fieldIndex).CanInterface() {
+					attrib.Value = rValue.Field(fieldIndex).Interface()
 				}
-				objectBuffer.Write(attrib.BValue)
-			} else {
-				connection.session.WriteClr(&objectBuffer, attrib.BValue)
+				if attrib.cusType != nil && attrib.cusType.isArray {
+					attrib.MaxNoOfArrayElements = 1
+				}
+				err = attrib.encodeWithType(connection)
+				if err != nil {
+					return err
+				}
+				pars = append(pars, attrib)
 			}
 		}
 		par.iPrimValue = pars
-		par.BValue = objectBuffer.Bytes()
 	}
 	return nil
 }
 
 func (par *ParameterInfo) encodePrimValue(conn *Connection) error {
 	var err error
-	if par.iPrimValue == nil {
-		par.BValue = nil
-		//par.MaxLen = 1
-		return nil
-	}
 	switch value := par.iPrimValue.(type) {
-	case float64:
-		par.BValue, err = converters.EncodeDouble(value)
-		if err != nil {
-			return err
+	case nil:
+		if par.DataType == XMLType && par.IsNull {
+			if par.cusType.isArray {
+				par.BValue = []byte{0xFF}
+			} else {
+				par.BValue = []byte{0xFD}
+			}
+			par.MaxNoOfArrayElements = 0
+			par.Flag = 0x3
+		} else {
+			par.BValue = nil
 		}
-	case int64:
-		par.BValue = converters.EncodeInt64(value)
-	case uint64:
-		par.BValue = converters.EncodeUint64(value)
+	//case float64:
+	//	par.BValue, err = converters.EncodeDouble(value)
+	//	if err != nil {
+	//		return err
+	//	}
+	//case int64:
+	//	par.BValue = converters.EncodeInt64(value)
+	//case uint64:
+	//	par.BValue = converters.EncodeUint64(value)
+	case *Number:
+		par.BValue = value.data
 	case bool:
 		par.BValue = converters.EncodeBool(value)
 	case string:
@@ -356,57 +421,42 @@ func (par *ParameterInfo) encodePrimValue(conn *Connection) error {
 	case []byte:
 		par.BValue = value
 	case []ParameterInfo:
+		session := conn.session
 		if par.MaxNoOfArrayElements > 0 {
+
 			if len(value) > 0 {
 				arrayBuffer := bytes.Buffer{}
-				session := conn.session
-				//arrayBuffer.Write([]byte{1})
 				if par.DataType == XMLType {
-					// number of fields
 					arrayBuffer.Write([]byte{1, 3})
-					//session.WriteUint(&arrayBuffer, len(par.cusType.attribs), 2, true, true)
-					// number of elements
 					session.WriteUint(&arrayBuffer, par.MaxNoOfArrayElements, 2, true, false)
-					//arrayBuffer.Write([]byte{uint8(par.MaxNoOfArrayElements)})
 				} else {
 					session.WriteUint(&arrayBuffer, par.MaxNoOfArrayElements, 4, true, true)
 				}
-				for _, tempPar := range value {
-					// get the binary representation of the item
-					err = tempPar.encodePrimValue(conn)
-					//if par.DataType == XMLType {
-					//	arrayBuffer.Write([]byte{0, 0, 0, 0xfe})
-					//}
+				for _, attrib := range value {
+					attrib.parent = nil
+					err = attrib.encodePrimValue(conn)
 					if err != nil {
 						return err
 					}
-					if par.MaxCharLen < tempPar.MaxCharLen {
-						par.MaxCharLen = tempPar.MaxCharLen
-					}
-					if par.MaxLen < tempPar.MaxLen {
-						par.MaxLen = tempPar.MaxLen
-					}
-					// save binary representation to the buffer
-					if tempPar.DataType == XMLType && tempPar.cusType != nil && tempPar.cusType.isArray {
-						dataSize := len(tempPar.BValue)
-						if dataSize > 0xFC {
-							arrayBuffer.WriteByte(0xFE)
-							session.WriteUint(&arrayBuffer, dataSize, 4, true, false)
-						} else {
-							arrayBuffer.WriteByte(uint8(dataSize))
-						}
-						arrayBuffer.Write(tempPar.BValue)
+					if attrib.DataType == XMLType {
+						session.WriteFixedClr(&arrayBuffer, attrib.BValue)
 					} else {
-						session.WriteClr(&arrayBuffer, tempPar.BValue)
+						if attrib.IsNull && par.DataType == XMLType {
+							arrayBuffer.WriteByte(0xff)
+						} else {
+							session.WriteClr(&arrayBuffer, attrib.BValue)
+						}
+
 					}
-					//session.WriteClr(&arrayBuffer, tempPar.BValue)
+					if par.MaxCharLen < attrib.MaxCharLen {
+						par.MaxCharLen = attrib.MaxCharLen
+					}
+					if par.MaxLen < attrib.MaxLen {
+						par.MaxLen = attrib.MaxLen
+					}
 				}
-				//if par.DataType == XMLType {
-				//	arrayBuffer.Write([]byte{0})
-				//}
 				par.BValue = arrayBuffer.Bytes()
 			}
-			// for array set maxsize of nchar and raw
 			if par.DataType == NCHAR {
 				par.MaxLen = conn.maxLen.nvarchar
 				par.MaxCharLen = par.MaxLen // / converters.MaxBytePerChar(par.CharsetID)
@@ -415,13 +465,35 @@ func (par *ParameterInfo) encodePrimValue(conn *Connection) error {
 				par.MaxLen = conn.maxLen.raw
 			}
 			if par.DataType == XMLType {
-				par.ToID = par.cusType.arrayTOID
-				par.BValue = encodeObject(conn.session, par.BValue, true)
-				par.Flag = 3
+				par.BValue = encodeObject(session, par.BValue, true)
 				par.MaxNoOfArrayElements = 0
+				par.Flag = 3
 			}
 		} else {
-			par.BValue = encodeObject(conn.session, par.BValue, false)
+			var objectBuffer bytes.Buffer
+			for _, attrib := range value {
+				err = attrib.encodePrimValue(conn)
+				if err != nil {
+					return err
+				}
+				if attrib.DataType == OCIFileLocator && attrib.MaxLen == 0 {
+					attrib.MaxLen = 4000
+				}
+				if attrib.DataType == XMLType {
+					if attrib.cusType.isArray {
+						session.WriteFixedClr(&objectBuffer, attrib.BValue)
+					} else {
+						objectBuffer.Write(attrib.BValue)
+					}
+				} else {
+					session.WriteClr(&objectBuffer, attrib.BValue)
+				}
+			}
+			if par.parent == nil {
+				par.BValue = encodeObject(session, objectBuffer.Bytes(), false)
+			} else {
+				par.BValue = objectBuffer.Bytes()
+			}
 		}
 	default:
 		return fmt.Errorf("unsupported primitive type: %v", reflect.TypeOf(par.iPrimValue).Name())
@@ -443,11 +515,9 @@ func (par *ParameterInfo) init() {
 	par.oPrimValue = nil
 }
 
-func (par *ParameterInfo) encodeValue(val driver.Value, size int, connection *Connection) error {
+func (par *ParameterInfo) encodeValue(size int, connection *Connection) error {
 	par.init()
-	par.Value = val
-
-	err := par.setDataType(reflect.TypeOf(val), val, connection)
+	err := par.setDataType(reflect.TypeOf(par.Value), par.Value, connection)
 	if err != nil {
 		return err
 	}
